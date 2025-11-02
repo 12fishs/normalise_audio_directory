@@ -1,25 +1,33 @@
 #!/bin/bash
 
 DIR="$1"
-EXT="$2"
-tracks=($(ls "$DIR"/*."$EXT" | sort -V))
-#
-# First remove all headroom, then enlist loudnesses and extract lowest loudness value
-cd "$DIR"
+HEADROOM="$2"
+
+tracks=()
+while IFS= read -r -d '' file; do
+    tracks+=("$file")
+done < <(find "$DIR" -type f -iname "*.wav" -print0 | sort -z -V)
+
+peak_0_loudnesses=()
+echo "analysing:"
 for track in "${tracks[@]}"; do
-    ffmpeg-normalize "$track" -nt peak -t 0 --keep-loudness-range-target \
-        -tp 0 -c:a pcm_s24le -ar 48000 -ofmt wav -ext wav -p
+    echo "$track"
+    data=$(ffmpeg-normalize "$track" -n -p -q)
+    peak_0_loudnesses+=("$(jq '.[0].ebu_pass1.input_i - .[0].ebu_pass1.input_tp' <<< "$data")")
 done
+# find minimum
+desired_loudness=${peak_0_loudnesses[0]}
+for i in "${peak_0_loudnesses[@]}"; do
+    if [ "$(bc -l <<< "$i < $desired_loudness")" -eq 1 ]; then
+        desired_loudness=$i
+    fi 
+done
+desired_loudness=$(echo "$desired_loudness - $HEADROOM" | bc -l)
+echo "desired loudness: $desired_loudness"
 
-# now use the output directory to find the lowest loudness and normalise all to that level
-DIR=$OUTDIR
-tracks=($(ls "$DIR"/*."$EXT" | sort -V))
-
-loudnesses=()
 for track in "${tracks[@]}"; do
-    loudnesses+=("$(ffmpeg-normalize "$DIR"/"$track" -n -p | jq '.[0].ebu_pass1.input_i')")
+    sample_rate=$(mdls -name kMDItemAudioSampleRate "$track" | awk '{print $3}')
+    echo "normalising $track"
+    ffmpeg-normalize "$track" -t "$desired_loudness" --keep-loudness-range-target -tp 0 \
+        --auto-lower-loudness-target -ar "$sample_rate" -ofmt wav -ext wav
 done
-echo "${loudnesses[@]}"
-
-
-
